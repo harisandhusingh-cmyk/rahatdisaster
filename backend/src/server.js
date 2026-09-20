@@ -1,12 +1,22 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
+import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 const port = process.env.PORT || 3001;
 const dataDir = path.resolve(process.cwd(), 'data');
 const dbPath = path.join(dataDir, 'rahat-db.json');
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabase = supabaseUrl && (supabaseAnonKey || supabaseServiceRoleKey)
+  ? createClient(supabaseUrl, supabaseServiceRoleKey || supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+  : null;
 
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
@@ -65,6 +75,59 @@ const ensureSeedUser = () => {
   }
 };
 
+const normalizeUserRow = (row) => ({
+  id: row.id,
+  email: row.email,
+  name: row.name,
+  role: row.role,
+  phone: row.phone || '',
+  password: row.password || '',
+  createdAt: row.created_at || row.createdAt || new Date().toISOString(),
+});
+
+const normalizeRequestRow = (row) => ({
+  id: row.id,
+  citizenEmail: row.citizen_email || row.citizenEmail,
+  citizenName: row.citizen_name || row.citizenName,
+  citizenPhone: row.citizen_phone || row.citizenPhone,
+  peopleAffected: Number(row.people_affected ?? row.peopleAffected ?? 1),
+  emergencyType: row.emergency_type || row.emergencyType,
+  requiredResources: row.required_resources || row.requiredResources || [],
+  severity: row.severity || 'MEDIUM',
+  description: row.description || '',
+  location: row.location || { lat: 0, lng: 0, address: '' },
+  accessibilityRequirements: row.accessibility_requirements || row.accessibilityRequirements || '',
+  preferredContact: row.preferred_contact || row.preferredContact || 'Phone',
+  status: row.status || 'NEW',
+  assignedVolunteerId: row.assigned_volunteer_id || row.assignedVolunteerId || undefined,
+  allocatedResources: row.allocated_resources || row.allocatedResources || [],
+  timeline: row.timeline || [],
+  coordinatorNotes: row.coordinator_notes || row.coordinatorNotes || '',
+  createdAt: row.created_at || row.createdAt || new Date().toISOString(),
+  updatedAt: row.updated_at || row.updatedAt || new Date().toISOString(),
+});
+
+const normalizeVolunteerRow = (row) => ({
+  id: row.id,
+  userId: row.userId || row.userid,
+  name: row.name,
+  phone: row.phone || '',
+  skills: row.skills || [],
+  availability: row.availability || 'AVAILABLE',
+  location: row.location || { lat: 0, lng: 0, address: '' },
+  vehicle: row.vehicle || 'None',
+  currentAssignmentIds: row.current_assignment_ids || row.currentAssignmentIds || [],
+  completedMissions: Number(row.completed_missions ?? row.completedMissions ?? 0),
+  experienceMonths: Number(row.experience_months ?? row.experienceMonths ?? 0),
+});
+
+const listSupabase = async (table) => {
+  if (!supabase) return null;
+  const { data, error } = await supabase.from(table).select('*');
+  if (error) return null;
+  return data || [];
+};
+
 ensureSeedUser();
 
 app.use(cors());
@@ -74,14 +137,35 @@ app.get('/api/v1/health', (_req, res) => {
   res.json({ ok: true, service: 'rahat-backend' });
 });
 
-app.get('/api/v1/users', (_req, res) => {
-  res.json(readDb().users);
+app.get('/api/v1/users', async (_req, res) => {
+  if (supabase) {
+    const rows = await listSupabase('users');
+    if (rows) {
+      return res.json(rows.map(normalizeUserRow));
+    }
+  }
+  return res.json(readDb().users);
 });
 
-app.post('/api/v1/users', (req, res) => {
+app.post('/api/v1/users', async (req, res) => {
   const { id, email, name, role, phone, password } = req.body || {};
   if (!id || !email || !name || !role) {
     return res.status(400).json({ error: 'Missing required user data' });
+  }
+
+  if (supabase) {
+    const payload = {
+      id,
+      email,
+      name,
+      role,
+      phone: phone || '',
+      password: password || '',
+      created_at: new Date().toISOString(),
+    };
+    const { error } = await supabase.from('users').upsert(payload, { onConflict: 'id' });
+    if (error) return res.status(400).json({ error: error.message });
+    return res.status(201).json({ ok: true, id });
   }
 
   const db = readDb();
@@ -103,15 +187,21 @@ app.post('/api/v1/users', (req, res) => {
   res.status(201).json({ ok: true, id });
 });
 
-app.get('/api/v1/requests', (_req, res) => {
+app.get('/api/v1/requests', async (_req, res) => {
+  if (supabase) {
+    const rows = await listSupabase('requests');
+    if (rows) {
+      return res.json(rows.map(normalizeRequestRow));
+    }
+  }
   const db = readDb();
-  res.json(db.requests.map((row) => ({
+  return res.json(db.requests.map((row) => ({
     ...row,
     location: { lat: row.location?.lat ?? 0, lng: row.location?.lng ?? 0, address: row.location?.address || '' },
   })));
 });
 
-app.post('/api/v1/requests', (req, res) => {
+app.post('/api/v1/requests', async (req, res) => {
   const body = req.body || {};
   const {
     id,
@@ -135,15 +225,14 @@ app.post('/api/v1/requests', (req, res) => {
     return res.status(400).json({ error: 'Missing request data' });
   }
 
-  const db = readDb();
   const request = {
     id,
-    citizenEmail,
-    citizenName,
-    citizenPhone,
-    peopleAffected: Number(peopleAffected || 1),
-    emergencyType,
-    requiredResources: requiredResources || [],
+    citizen_email: citizenEmail,
+    citizen_name: citizenName,
+    citizen_phone: citizenPhone,
+    people_affected: Number(peopleAffected || 1),
+    emergency_type: emergencyType,
+    required_resources: requiredResources || [],
     severity: severity || 'MEDIUM',
     description: description || '',
     location: {
@@ -151,20 +240,27 @@ app.post('/api/v1/requests', (req, res) => {
       lng: Number(location.lng || 0),
       address: location.address || '',
     },
-    accessibilityRequirements: accessibilityRequirements || '',
-    preferredContact: preferredContact || 'Phone',
+    accessibility_requirements: accessibilityRequirements || '',
+    preferred_contact: preferredContact || 'Phone',
     status: status || 'NEW',
-    assignedVolunteerId: assignedVolunteerId || undefined,
-    allocatedResources: [],
+    assigned_volunteer_id: assignedVolunteerId || null,
+    allocated_resources: [],
     timeline: [{ status: status || 'NEW', timestamp: new Date().toISOString(), note: 'Request submitted through the citizen portal' }],
-    coordinatorNotes: coordinatorNotes || '',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    coordinator_notes: coordinatorNotes || '',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   };
 
-  db.requests = [request, ...db.requests];
+  if (supabase) {
+    const { error } = await supabase.from('requests').upsert(request, { onConflict: 'id' });
+    if (error) return res.status(400).json({ error: error.message });
+    return res.status(201).json({ ok: true, id });
+  }
+
+  const db = readDb();
+  db.requests = [{ ...normalizeRequestRow(request), ...request, location: request.location }, ...db.requests];
   writeDb(db);
-  res.status(201).json({ ok: true, id });
+  return res.status(201).json({ ok: true, id });
 });
 
 app.post('/api/v1/requests/:id/assign-volunteer', (req, res) => {
@@ -182,20 +278,50 @@ app.post('/api/v1/requests/:id/assign-volunteer', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/v1/volunteers', (_req, res) => {
+app.get('/api/v1/volunteers', async (_req, res) => {
+  if (supabase) {
+    const rows = await listSupabase('volunteers');
+    if (rows) {
+      return res.json(rows.map(normalizeVolunteerRow));
+    }
+  }
   const db = readDb();
-  res.json(db.volunteers.map((row) => ({
+  return res.json(db.volunteers.map((row) => ({
     ...row,
     location: { lat: row.location?.lat ?? 0, lng: row.location?.lng ?? 0, address: row.location?.address || '' },
   })));
 });
 
-app.post('/api/v1/volunteers', (req, res) => {
+app.post('/api/v1/volunteers', async (req, res) => {
   const body = req.body || {};
   const { id, userId, name, phone, skills, availability, location, vehicle, currentAssignmentIds, completedMissions, experienceMonths } = body;
 
   if (!id || !name) {
     return res.status(400).json({ error: 'Missing volunteer data' });
+  }
+
+  const volunteer = {
+    id,
+    userid: userId || null,
+    name,
+    phone: phone || '',
+    skills: skills || [],
+    availability: availability || 'AVAILABLE',
+    location: {
+      lat: Number(location?.lat || 0),
+      lng: Number(location?.lng || 0),
+      address: location?.address || '',
+    },
+    vehicle: vehicle || 'None',
+    current_assignment_ids: currentAssignmentIds || [],
+    completed_missions: Number(completedMissions || 0),
+    experience_months: Number(experienceMonths || 0),
+  };
+
+  if (supabase) {
+    const { error } = await supabase.from('volunteers').upsert(volunteer, { onConflict: 'id' });
+    if (error) return res.status(400).json({ error: error.message });
+    return res.status(201).json({ ok: true, id });
   }
 
   const db = readDb();
