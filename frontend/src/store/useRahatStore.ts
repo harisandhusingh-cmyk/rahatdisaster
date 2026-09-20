@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import * as idbKeyval from 'idb-keyval';
+import { clearAppState, loadAppState, saveAppState } from '../utils/database';
 
 import type {
   Allocation,
@@ -102,6 +103,7 @@ export type RahatActions = {
 export type RahatStore = RahatSlice & RahatActions;
 
 const STORAGE_KEY = 'rahat-store-v1';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001').replace(/\/$/, '');
 const PERSIST_KEYS: Array<keyof RahatSlice> = [
   'users',
   'requests',
@@ -122,12 +124,20 @@ const PERSIST_KEYS: Array<keyof RahatSlice> = [
 async function persist(state: RahatSlice): Promise<void> {
   const snapshot: Partial<RahatSlice> = {};
   for (const k of PERSIST_KEYS) snapshot[k] = state[k] as any;
+
+  try {
+    await saveAppState(snapshot);
+  } catch {
+    /* ignore */
+  }
+
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
     window.dispatchEvent(new CustomEvent('rahat-store-updated'));
   } catch {
     /* ignore */
   }
+
   try {
     await idbKeyval.set(STORAGE_KEY, snapshot);
   } catch {
@@ -140,6 +150,13 @@ async function persist(state: RahatSlice): Promise<void> {
 }
 
 async function hydrate(): Promise<Partial<RahatSlice> | null> {
+  try {
+    const fromDb = await loadAppState();
+    if (fromDb && fromDb.users && Array.isArray(fromDb.users) && fromDb.users.length > 0) return fromDb;
+  } catch {
+    /* fallthrough */
+  }
+
   try {
     const fromIdb = (await idbKeyval.get(STORAGE_KEY)) as Partial<RahatSlice> | undefined;
     if (fromIdb && fromIdb.users && fromIdb.users.length > 0) return fromIdb;
@@ -157,6 +174,11 @@ async function hydrate(): Promise<Partial<RahatSlice> | null> {
 
 async function clearStorage(): Promise<void> {
   try {
+    await clearAppState();
+  } catch {
+    /* ignore */
+  }
+  try {
     await idbKeyval.del(STORAGE_KEY);
   } catch {
     /* ignore */
@@ -165,6 +187,34 @@ async function clearStorage(): Promise<void> {
     localStorage.removeItem(STORAGE_KEY);
   } catch {
     /* ignore */
+  }
+}
+
+async function syncRemoteState(): Promise<Partial<RahatSlice> | null> {
+  try {
+    const [usersRes, requestsRes, volunteersRes] = await Promise.all([
+      fetch(`${API_BASE_URL}/api/v1/users`),
+      fetch(`${API_BASE_URL}/api/v1/requests`),
+      fetch(`${API_BASE_URL}/api/v1/volunteers`),
+    ]);
+
+    if (!usersRes.ok && !requestsRes.ok && !volunteersRes.ok) {
+      return null;
+    }
+
+    const users = usersRes.ok ? await usersRes.json() : [];
+    const requests = requestsRes.ok ? await requestsRes.json() : [];
+    const volunteers = volunteersRes.ok ? await volunteersRes.json() : [];
+
+    return {
+      initialized: true,
+      backendOnline: true,
+      users: Array.isArray(users) ? users : [],
+      requests: Array.isArray(requests) ? requests : [],
+      volunteers: Array.isArray(volunteers) ? volunteers : [],
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -217,6 +267,14 @@ export const useRahatStore = create<RahatStore>((set, get) => ({
 
   initialize: async () => {
     if (get().initialized) return;
+
+    const remote = await syncRemoteState();
+    if (remote && Array.isArray(remote.users) && remote.users.length > 0) {
+      set((s) => ({ ...s, ...remote, initialized: true, backendOnline: true }));
+      await persist(get());
+      return;
+    }
+
     const hydrated = await hydrate();
     if (hydrated) {
       const hasLegacyDemo = hydrated.users?.some((user) => user.email.endsWith('@rahat.demo'));
@@ -306,6 +364,20 @@ export const useRahatStore = create<RahatStore>((set, get) => ({
     if (input.role === 'volunteer') {
       set((s) => ({ ...s, volunteers: [...s.volunteers, { id: generateUUID(), userId, name: user.name, phone: user.phone || '', skills: ['Communication'], availability: 'AVAILABLE', location: { lat: 26.98, lng: 84.5, address: 'Location not shared yet' }, vehicle: 'None', currentAssignmentIds: [], completedMissions: 0, experienceMonths: 0 }] }));
     }
+
+    void fetch(`${API_BASE_URL}/api/v1/users`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: userId,
+        email,
+        name: input.name.trim(),
+        role: input.role,
+        phone: input.phone.trim(),
+        password: input.password,
+      }),
+    }).catch(() => undefined);
+
     persist(get());
     return { ok: true, userId };
   },
@@ -397,6 +469,23 @@ export const useRahatStore = create<RahatStore>((set, get) => ({
     const user: UserProfile = { id: userId, email: input.email.trim().toLowerCase(), name: input.name.trim(), role: 'volunteer', phone: input.phone.trim(), createdAt: ts };
     const volunteer: Volunteer = { id: volunteerId, userId, name: user.name, phone: user.phone || '', skills: input.skills, availability: 'AVAILABLE', location: { lat: 26.98, lng: 84.5, address: 'West Champaran District, Bihar, India' }, vehicle: input.vehicle, currentAssignmentIds: [], completedMissions: 0, experienceMonths: 0 };
     set((s) => ({ ...s, users: [...s.users, user], volunteers: [...s.volunteers, volunteer] }));
+    void fetch(`${API_BASE_URL}/api/v1/volunteers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: volunteerId,
+        userId,
+        name: input.name.trim(),
+        phone: input.phone.trim(),
+        skills: input.skills,
+        availability: 'AVAILABLE',
+        location: { lat: 26.98, lng: 84.5, address: 'West Champaran District, Bihar, India' },
+        vehicle: input.vehicle,
+        currentAssignmentIds: [],
+        completedMissions: 0,
+        experienceMonths: 0,
+      }),
+    }).catch(() => undefined);
     get().appendAuditLog({ actor: state.currentUserId || 'system', action: 'CREATE_VOLUNTEER', entityType: 'VOLUNTEER', entityId: volunteerId, note: `Created volunteer profile for ${user.name}` });
     persist(get());
     return { ok: true, volunteerId };
@@ -417,6 +506,11 @@ export const useRahatStore = create<RahatStore>((set, get) => ({
       updatedAt: ts,
     };
     set((s) => ({ ...s, requests: [request, ...s.requests], requestCounter: nextCounter }));
+    void fetch(`${API_BASE_URL}/api/v1/requests`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    }).catch(() => undefined);
     get().createNotification({
       targetRole: 'coordinator',
       type: 'NEW_REQUEST',
@@ -499,6 +593,11 @@ export const useRahatStore = create<RahatStore>((set, get) => ({
       ],
       updatedAt: ts,
     };
+    void fetch(`${API_BASE_URL}/api/v1/requests/${requestId}/assign-volunteer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volunteerId }),
+    }).catch(() => undefined);
     set((s) => ({
       ...s,
       volunteers: s.volunteers.map((v) => (v.id === volunteerId ? updatedVol : v)),

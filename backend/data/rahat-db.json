@@ -1,0 +1,50 @@
+{
+  "users": [
+    {
+      "id": "u-admin",
+      "email": "admin@rahat.com",
+      "name": "Aditya",
+      "role": "coordinator",
+      "phone": "",
+      "password": "@Aditya#8080",
+      "createdAt": "2026-09-20T04:47:29.512Z"
+    }
+  ],
+  "requests": [
+    {
+      "id": "REQ-TEST-001",
+      "citizenEmail": "amit@example.com",
+      "citizenName": "Amit Kumar",
+      "citizenPhone": "9876543210",
+      "peopleAffected": 12,
+      "emergencyType": "Flood",
+      "requiredResources": [
+        "Rescue Boat",
+        "Medical Kit"
+      ],
+      "severity": "HIGH",
+      "description": "Water entering homes near the riverbank.",
+      "location": {
+        "lat": 27.17,
+        "lng": 84.1,
+        "address": "Motihari, Bihar"
+      },
+      "accessibilityRequirements": "Wheelchair access",
+      "preferredContact": "Phone",
+      "status": "NEW",
+      "allocatedResources": [],
+      "timeline": [
+        {
+          "status": "NEW",
+          "timestamp": "2026-09-20T04:53:57.214Z",
+          "note": "Request submitted through the citizen portal"
+        }
+      ],
+      "coordinatorNotes": "",
+      "createdAt": "2026-09-20T04:53:57.214Z",
+      "updatedAt": "2026-09-20T04:53:57.214Z"
+    }
+  ],
+  "volunteers": [],
+  "notifications": []
+}
